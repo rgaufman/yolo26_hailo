@@ -5,7 +5,7 @@ import cv2
 import time
 from dataclasses import dataclass
 from typing import Dict, Tuple, List
-from hailo_platform import VDevice, HEF, ConfigureParams, InputVStreamParams, OutputVStreamParams, InferVStreams, HailoStreamInterface
+from hailo_platform import VDevice, HEF, ConfigureParams, InputVStreamParams, OutputVStreamParams, InferVStreams, HailoStreamInterface, FormatType
 import math
 
 # ultralytics removed
@@ -139,7 +139,7 @@ class HailoPythonInferenceEngine:
         
         # Setup vstreams
         self.input_vstream_params = InputVStreamParams.make(self.network_group)
-        self.output_vstream_params = OutputVStreamParams.make(self.network_group)
+        self.output_vstream_params = OutputVStreamParams.make(self.network_group, format_type=FormatType.FLOAT32)
         
         # Expected shape mapping for data alignment
         self.shape_to_name = {
@@ -149,12 +149,8 @@ class HailoPythonInferenceEngine:
             (1, 1, 8400, 4): 'reg'
         }
 
-        # Extract quantization info from HEF
-        self.quant_info = self._extract_quant_info()
-        
         print(f"✓ Hailo engine initialized: {hef_path}")
         print(f"✓ Using Python head for post-processing.")
-        print(f"✓ Quantization info: {self.quant_info}")
     
     @staticmethod
     def preprocess(img_path: str, width: int = 640, height: int = 640, normalize: bool = False) -> Tuple[np.ndarray, Tuple[int, int]]:
@@ -199,50 +195,6 @@ class HailoPythonInferenceEngine:
         if img is None:
             raise FileNotFoundError(f"Image not found: {img_path}")
         return img
-
-    def _extract_quant_info(self) -> Dict[str, Tuple[float, float]]:
-        """Extract quantization scale and zero_point from HEF
-        
-        Returns:
-            Dict mapping output names to (scale, zero_point) tuples
-        """
-        quant_info = {}
-        
-        # Get output vstream info which contains quantization parameters
-        for output_name in self.hef.get_output_vstream_infos():
-            quant = output_name.quant_info
-            if quant is not None:
-                # scale converts from int8/uint8 to float: float_val = (int_val - zero_point) * scale
-                scale = quant.qp_scale
-                zero_point = quant.qp_zp
-                quant_info[output_name.name] = (scale, zero_point)
-            else:
-                # No quantization, use identity
-                quant_info[output_name.name] = (1.0, 0.0)
-        
-        return quant_info
-    
-    def _dequantize_hailo_outputs(self, hailo_results: Dict, verbose: bool = False) -> Dict:
-        """Dequantize Hailo outputs using quantization parameters from the HEF."""
-        dequantized_results = {}
-        if verbose:
-            print("  [DEBUG] Dequantizing Hailo outputs...")
-
-        for output_name, raw_data in hailo_results.items():
-            data = raw_data.copy().astype(np.float32)
-            
-            if output_name in self.quant_info:
-                scale, zero_point = self.quant_info[output_name]
-                data = (data - zero_point) * scale
-                if verbose:
-                    print(f"    - {output_name}: Dequantized with scale={scale:.6f}, zp={zero_point}")
-            else:
-                if verbose:
-                    print(f"    - {output_name}: No quantization info found, skipping.")
-            
-            dequantized_results[output_name] = data
-            
-        return dequantized_results
 
     
     def _run_python_head(self, dequantized_results: Dict, conf_threshold: float) -> List[dict]:
@@ -345,12 +297,11 @@ class HailoPythonInferenceEngine:
                 stats.hailo_output_shape = str({k: v.shape for k, v in hailo_results.items()})
                 if verbose: print(f"  ✓ Hailo inference: {stats.hailo_inference_time*1000:.2f}ms")
 
-                # B. Dequantization and Python Head
-                if verbose: print(f"[STAGE 2] Running Dequantization and Python Head...")
+                # B. Python Head
+                if verbose: print(f"[STAGE 2] Running Python Head...")
                 t_post = time.perf_counter()
-                dequantized_results = self._dequantize_hailo_outputs(hailo_results, verbose=verbose)
                 
-                detections = self._run_python_head(dequantized_results, conf_threshold)
+                detections = self._run_python_head(hailo_results, conf_threshold)
                 stats.data_mapping_time = time.perf_counter() - t_post
                 stats.final_output_shape = f"{len(detections)} detections"
                 if verbose: print(f"  ✓ Python head: {stats.data_mapping_time*1000:.2f}ms")
