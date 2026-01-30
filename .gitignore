@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+
+# Distribution / Packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# C++ Build Artifacts
+*.o
+*.obj
+*.exe
+cpp/detect_image
+cpp/benchmark_inference
+cpp/run_coco_inference
+cpp/test_postprocess
+
+# IDEs
+.vscode/
+.idea/
+
+# Data sets (Download scripts will recreate these)
+data/coco/
+data/calib_images/
+
+# Models (Scripts will generate these)
+# Uncomment if you wish to commit specific models
+models/*.pt
+models/*.onnx
+models/*.har
+models/*.hef
+models/*.npy
+
+# Output files
+*.jpg
+*.png
+*.json
+output/

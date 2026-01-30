@@ -1,0 +1,9 @@
+numpy
+opencv-python
+# onnxruntime  # Optional: for full ONNX comparison
+# tensorflow   # Optional: for quantization scripts
+# hailo-platform  # Required: Install via HailoRT
+# hailo-sdk-client # Required: Install via Hailo DFC
+fiftyone  # For downloading calibration data
+ultralytics==8.3.0 # For model export
+onnx # For subgraph extraction
