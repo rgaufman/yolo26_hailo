@@ -7,3 +7,4 @@ opencv-python
 fiftyone  # For downloading calibration data
 ultralytics==8.3.0 # For model export
 onnx # For subgraph extraction
+pydantic # For configuration management

@@ -54,3 +54,5 @@ models/*.npy
 *.png
 *.json
 output/
+*.log
+experiments/

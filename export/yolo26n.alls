@@ -5,8 +5,12 @@ normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])
 performance_param(compiler_optimization_level=max)
 
 # Step 3: Global optimization level (0 is fastest, 2 is standard)
-# model_optimization_config(calibration, batch_size=8, calibset_size=1024)
 model_optimization_flavor(optimization_level=2)
 
 # 3. Enable Multi-Context for the Hailo-8L
-context_switch_param(mode=enabled)
+context_switch_param(mode=allowed)
+
+model_optimization_config(calibration, calibset_size=1024)
+
+pre_quantization_optimization(activation_clipping, layers={*}, mode=percentile, clipping_values=[0.01, 99.99])
+pre_quantization_optimization(weights_clipping, layers={*}, mode=percentile, clipping_values=[0.01, 99.99])

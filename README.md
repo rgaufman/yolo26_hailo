@@ -7,7 +7,7 @@ This repository provides a complete pipeline for deploying YOLO26n object detect
 ```
 .
 ├── cpp/                 # C++ inference and COCO evaluation code
-├── export/              # Scripts to convert ONNX to Hailo HEF format
+├── export/              # Python package for model conversion (ONNX → HEF)
 ├── models/              # Place your .onnx and .hef models here
 ├── python/              # Python inference scripts
 ├── data/                # Data directory (calibration images, COCO val)
@@ -96,38 +96,37 @@ python export/0_extract_subgraphs.py models/yolo26n.onnx models/
 
 ## 2. Model Export (ONNX → HEF)
 
-The export process involves 3 steps: separating the model into backbone/head (automatically handled by the HAR parser), quantizing the backbone, and compiling to HEF.
+The export process is fully automated using `export.cli`. This package handles extracting subgraphs, parsing to HAR, quantizing, and compiling to HEF. It creates a unique experiment directory for each run with full logs and artifacts.
 
 > [!NOTE]
-> These export scripts (`export/*.py`) require the **Hailo Dataflow Compiler (DFC)** environment.
+> These export scripts require the **Hailo Dataflow Compiler (DFC)** environment.
 
-**Files required:** `models/yolo26n.onnx`.
-
-### Step 1: Parse ONNX to HAR
-
-Extracts the backbone from the ONNX model.
+### Usage
 
 ```bash
-# From the root directory
-python export/1_onnx_to_har.py models/yolo26n.onnx models/yolo26n.har
+# Run from the repository root
+python -m export.cli \
+  --variant yolo26n \
+  --target hailo8l \
+  --onnx models/yolo26n.onnx \
+  --calib_dir data/coco/val2017 \
+  --tag my_experiment
 ```
 
-### Step 2: Quantize HAR
+### Arguments
+-   `--variant`: `yolo26n` (default), `yolo26s`, `yolo26m`, `yolo26l`.
+-   `--target`: `hailo8l` (default), `hailo8`.
+-   `--onnx`: Path to the input ONNX model.
+-   `--calib_dir`: Directory containing calibration images.
+-   `--alls`: (Optional) Path to a custom `.alls` model script.
+-   `--tag`: (Optional) Custom tag for the experiment run name.
 
-Quantizes the model using calibration images. You need a directory with ~1024 calibration images (e.g., from COCO train/val) in `data/calib_images`.
-
-```bash
-# Ensure you have calibration images in data/calib_images
-python export/2_quantize_har.py models/yolo26n.har models/yolo26n_quantized.har data/calib_images
-```
-
-### Step 3: Compile to HEF
-
-Compiles the quantized model to a Hailo Executable Format (HEF) binary.
-
-```bash
-python export/3_compile_hef.py models/yolo26n_quantized.har models/yolo26n.hef
-```
+### Configuration
+-   **`export/config.py`**: Pydantic-based configuration and variant definitions.
+-   **Output**: Results are saved in `experiments/{VARIANT}_{TARGET}_{TIMESTAMP}/`.
+    -   `artifacts/3_compiled/model.hef`: Final compiled binary.
+    -   `run.log`: Full execution log.
+    -   `model_script.alls`: The model script used (if any).
 
 ---
 
