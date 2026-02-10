@@ -159,17 +159,19 @@ int main(int argc, char** argv) {
 
         // --- Post-process Preparation ---
         std::vector<const float*> cls_ptrs(3);
-        const float* reg_ptr = nullptr;
+        std::vector<const float*> reg_ptrs(3);
         
         for (auto& pair : output_buffers) {
             size_t count = pair.second.size();
-            if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8
-            else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16
-            else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32
-            else if (count == 33600) reg_ptr = pair.second.data();
+            if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8 cls
+            else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16 cls
+            else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32 cls
+            else if (count == 25600) reg_ptrs[0] = pair.second.data();  // Stride 8 reg
+            else if (count == 6400) reg_ptrs[1] = pair.second.data();   // Stride 16 reg
+            else if (count == 1600) reg_ptrs[2] = pair.second.data();   // Stride 32 reg
         }
         
-        if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptr) {
+        if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptrs[0] || !reg_ptrs[1] || !reg_ptrs[2]) {
              // In benchmark, maybe we should warn but continue? 
              // If pointers are wrong, we might crash.
              // But size check should be consistent.
@@ -185,7 +187,7 @@ int main(int argc, char** argv) {
             IntList<8, 16, 32>{},
             IntList<80, 40, 20>{},
             cls_ptrs,
-            reg_ptr,
+            reg_ptrs,
             0.01f 
         );
         

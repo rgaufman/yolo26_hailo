@@ -46,7 +46,7 @@ std::vector<Detection> run_postprocess(
     IntList<Strides...>,
     IntList<Grids...>,
     const std::vector<const float*>& cls_tensors,
-    const float* reg_tensor,
+    const std::vector<const float*>& reg_tensors,
     float conf_threshold
 ) {
     const int strides[] = {Strides...};
@@ -56,31 +56,27 @@ std::vector<Detection> run_postprocess(
     
     static_assert(sizeof...(Strides) == sizeof...(Grids), "Strides and Grids lists must be the same length");
     
-    if (cls_tensors.size() != NUM_SCALES) {
-        std::cerr << "Error: Expected " << NUM_SCALES << " class tensors, got " << cls_tensors.size() << std::endl;
+    if (cls_tensors.size() != NUM_SCALES || reg_tensors.size() != NUM_SCALES) {
+        std::cerr << "Error: Expected " << NUM_SCALES << " class and regression tensors, got " 
+                  << cls_tensors.size() << " and " << reg_tensors.size() << std::endl;
         return {};
     }
 
     std::vector<Detection> results;
-    int global_offset = 0;
     // Calculate logit threshold once
-    // Ensure conf_threshold is within (0, 1) to avoid log issues
     if (conf_threshold <= 0.0f) conf_threshold = 0.001f;
     if (conf_threshold >= 1.0f) conf_threshold = 0.999f;
     float logit_threshold = -std::log(1.0f / conf_threshold - 1.0f);
 
     for (size_t s = 0; s < NUM_SCALES; ++s) {
-        // int stride = strides[s]; // stride unused in logic currently, but good to have if needed for scaling
+
         int grid_dim = grids[s];
         int num_anchors = grid_dim * grid_dim;
         const float* cls_data = cls_tensors[s];
 
         for (int i = 0; i < num_anchors; ++i) {
-            int global_idx = global_offset + i;
             
-            // Find max class logit
-            // Memory layout: (NumAnchors, 80)
-            // Access: [AnchorIdx * 80 + ClassIdx]
+
             float max_logit = -1000.0f; 
             int class_id = -1;
             int anchor_offset = i * 80;
@@ -96,21 +92,31 @@ std::vector<Detection> run_postprocess(
             if (max_logit > logit_threshold) {
                 float score = sigmoid(max_logit);
                 
-                // Decode Box
-                // reg_tensor layout: (TotalAnchors, 4)
-                // Access: [GlobalIdx * 4 + CoordIdx]
-                int reg_offset = global_idx * 4;
-                float l = reg_tensor[reg_offset + 0];
-                float t = reg_tensor[reg_offset + 1];
-                float r = reg_tensor[reg_offset + 2];
-                float b = reg_tensor[reg_offset + 3];
+
+                const float* reg_data = reg_tensors[s];
+                int reg_offset = i * 4;
                 
-                // l, t, r, b are absolute coordinates
+                float l = reg_data[reg_offset + 0];
+                float t = reg_data[reg_offset + 1];
+                float r = reg_data[reg_offset + 2];
+                float b = reg_data[reg_offset + 3];
+
+                
+                int row = i / grid_dim;
+                int col = i % grid_dim;
+                
+                float stride = (float)strides[s];
+                
+                float x1 = (col + 0.5f - l) * stride;
+                float y1 = (row + 0.5f - t) * stride;
+                float x2 = (col + 0.5f + r) * stride;
+                float y2 = (row + 0.5f + b) * stride;
+                
                 Detection det;
-                det.x = l;
-                det.y = t;
-                det.w = r;
-                det.h = b;
+                det.x = x1;
+                det.y = y1;
+                det.w = x2;
+                det.h = y2;
                 det.conf = score;
                 det.cls_id = class_id;
                 
@@ -123,7 +129,6 @@ std::vector<Detection> run_postprocess(
                 results.push_back(det);
             }
         }
-        global_offset += num_anchors;
     }
     
     return results;

@@ -139,7 +139,6 @@ int main(int argc, char** argv) {
         // In common.py: shape_to_name map was used for Python...
         // But here we might get raw names from HEF.
         // We will read the data and try to identify by shape later or hope names make sense.
-        // Actually, let's collect all data.
         
         size_t framesize = output_vstream.get_frame_size();
         std::vector<float> buffer(framesize / sizeof(float)); // Since we requested FLOAT32
@@ -163,23 +162,30 @@ int main(int argc, char** argv) {
     // cls_80: 80*80*80 = 512000 floats
     // cls_40: 40*40*80 = 128000 floats
     // cls_20: 20*20*80 = 32000 floats
-    // reg:    8400*4   = 33600 floats
+    // reg_80: 80*80*4  = 25600 floats
+    // reg_40: 40*40*4  = 6400 floats
+    // reg_20: 20*20*4  = 1600 floats
     
     std::vector<const float*> cls_ptrs(3);
-    const float* reg_ptr = nullptr;
-    
+    std::vector<const float*> reg_ptrs(3);
+    for (auto& pair : output_data) {
+            size_t count = pair.second.size();
+            std::cout << "Output " << pair.first << " has " << count << " elements\n";
+        }
     for (auto& pair : output_data) {
         size_t count = pair.second.size();
-        if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8
-        else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16
-        else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32
-        else if (count == 33600) reg_ptr = pair.second.data();
+        if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8 cls
+        else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16 cls
+        else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32 cls
+        else if (count == 25600) reg_ptrs[0] = pair.second.data();  // Stride 8 reg
+        else if (count == 6400) reg_ptrs[1] = pair.second.data();   // Stride 16 reg
+        else if (count == 1600) reg_ptrs[2] = pair.second.data();   // Stride 32 reg
         else {
             std::cout << "Warning: Unknown output tensor size: " << count << " (" << pair.first << ")" << std::endl;
         }
     }
     
-    if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptr) {
+    if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptrs[0] || !reg_ptrs[1] || !reg_ptrs[2]) {
         std::cerr << "Error: Could not identify all required output tensors by size." << std::endl;
         std::cerr << "Sizes found:" << std::endl;
         for (auto& pair : output_data) std::cout << pair.first << ": " << pair.second.size() << std::endl;
@@ -191,7 +197,7 @@ int main(int argc, char** argv) {
         IntList<8, 16, 32>{},
         IntList<80, 40, 20>{},
         cls_ptrs,
-        reg_ptr,
+        reg_ptrs,
         conf_threshold
     );
 

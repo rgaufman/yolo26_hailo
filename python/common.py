@@ -142,11 +142,16 @@ class HailoPythonInferenceEngine:
         self.output_vstream_params = OutputVStreamParams.make(self.network_group, format_type=FormatType.FLOAT32)
         
         # Expected shape mapping for data alignment
+        # New model has 6 outputs: 3 output scales x (1 classification + 1 regression)
+        # Classification: 80 classes
+        # Regression: 4 coordinates
         self.shape_to_name = {
             (1, 80, 80, 80): 'cls_80',
             (1, 40, 40, 80): 'cls_40',
             (1, 20, 20, 80): 'cls_20',
-            (1, 1, 8400, 4): 'reg'
+            (1, 80, 80, 4): 'reg_80',
+            (1, 40, 40, 4): 'reg_40',
+            (1, 20, 20, 4): 'reg_20',
         }
 
         print(f"✓ Hailo engine initialized: {hef_path}")
@@ -200,48 +205,79 @@ class HailoPythonInferenceEngine:
     def _run_python_head(self, dequantized_results: Dict, conf_threshold: float) -> List[dict]:
         """Run python head logic on dequantized Hailo outputs."""
         
-        # 1. Map dequantized results to named tensors from head.py
+        # 1. Map dequantized results to named tensors
         tensors = {}
+        found_shapes = []
         for _, data in dequantized_results.items():
-            if data.shape in self.shape_to_name:
-                name = self.shape_to_name[data.shape]
+            shape = data.shape
+            found_shapes.append(shape)
+            if shape in self.shape_to_name:
+                name = self.shape_to_name[shape]
                 tensors[name] = data
-
-        cls_80 = tensors['cls_80'][0]
-        cls_40 = tensors['cls_40'][0]
-        cls_20 = tensors['cls_20'][0]
-        reg_tensor = tensors['reg'][0, 0]
-
-        cls_80 = cls_80.reshape(80*80, 80).transpose(1, 0)
-        cls_40 = cls_40.reshape(40*40, 80).transpose(1, 0)
-        cls_20 = cls_20.reshape(20*20, 80).transpose(1, 0)
-        reg_tensor = reg_tensor.transpose(1, 0)
         
-        cls_tensors = [cls_80, cls_40, cls_20]
+        # Check if we have all required tensors
+        required_tensors = ['cls_80', 'cls_40', 'cls_20', 'reg_80', 'reg_40', 'reg_20']
+        missing = [t for t in required_tensors if t not in tensors]
+        if missing:
+            # Fallback for old model or error
+            if 'reg' in self.shape_to_name and (1, 1, 8400, 4) in [s for s in found_shapes]:
+                 print("Warning: Detected old model output structure. Please update HEF.")
+            # Verify we have at least what we need
+            if len(missing) > 0:
+                 print(f"Error: Missing tensors from HEF: {missing}")
+                 print(f"Found shapes: {found_shapes}")
+                 return []
+
+        # Prepare tensors list
+        # We need pairs of (cls, reg) for each scale
+        # Scales: 80x80 (stride 8), 40x40 (stride 16), 20x20 (stride 32)
         
-        # 2. Configuration from head.py
+        # Transpose to (channels, H, W) or flattened? 
+        # The loops below expect specific formats.
+        
+        # Original code expected: 
+        # cls: (80, 6400) -> (classes, anchors)
+        # reg: (4, 8400) -> (coords, all_anchors) (concatenated)
+        
+        # Let's adapt to processing per scale
+        
         STRIDES = [8, 16, 32]
         GRID_SIZES = [80, 40, 20]
         LOGIT_THRESHOLD = -math.log(1.0 / conf_threshold - 1.0)
         
-        # 3. decode_and_filter logic from head.py
         results = []
-        global_offset = 0
         coco_classes = DetectionPostProcessor._load_coco_classes()
-
+        
         for scale_idx in range(len(STRIDES)):
             stride = STRIDES[scale_idx]
             grid_dim = GRID_SIZES[scale_idx]
-            num_anchors = grid_dim * grid_dim
-            cls_data = cls_tensors[scale_idx]
-
+            
+            suffix = f"_{grid_dim}"
+            cls_key = f"cls{suffix}"
+            reg_key = f"reg{suffix}"
+            
+            cls_data = tensors[cls_key][0] # (H, W, 80)
+            reg_data = tensors[reg_key][0] # (H, W, 4)
+            
+            # Reshape to (H*W, C)
+            cls_flat = cls_data.reshape(-1, 80)
+            reg_flat = reg_data.reshape(-1, 4)
+            
+            num_anchors = cls_flat.shape[0]
+            
             for i in range(num_anchors):
-                global_idx = global_offset + i
-                
+
+                # Find max class score
                 max_logit = -100.0
                 class_id = -1
+                
+
+                # Simple loop optimization
+                row_logits = cls_flat[i]
+                
+
                 for c in range(80):
-                    logit = cls_data[c, i]
+                    logit = row_logits[c]
                     if logit > max_logit:
                         max_logit = logit
                         class_id = c
@@ -249,15 +285,19 @@ class HailoPythonInferenceEngine:
                 if max_logit > LOGIT_THRESHOLD:
                     score = sigmoid(max_logit)
                     
-                    l = reg_tensor[0, global_idx]
-                    t = reg_tensor[1, global_idx]
-                    r = reg_tensor[2, global_idx]
-                    b = reg_tensor[3, global_idx]
+
+                    row = i // grid_dim
+                    col = i % grid_dim
                     
-                    x1 = l
-                    y1 = t
-                    x2 = r
-                    y2 = b
+                    l = reg_flat[i, 0]
+                    t = reg_flat[i, 1]
+                    r = reg_flat[i, 2]
+                    b = reg_flat[i, 3]
+                    
+                    x1 = (col + 0.5 - l) * stride
+                    y1 = (row + 0.5 - t) * stride
+                    x2 = (col + 0.5 + r) * stride
+                    y2 = (row + 0.5 + b) * stride
                     
                     results.append({
                         'x': round(x1, 2),
@@ -268,9 +308,7 @@ class HailoPythonInferenceEngine:
                         'cls_id': class_id,
                         'cls_name': coco_classes.get(class_id, 'N/A')
                     })
-
-            global_offset += num_anchors
-
+        
         return results
     
     def infer(self, input_data: np.ndarray, verbose: bool = False, save_output: bool = False, conf_threshold: float = 0.5) -> Tuple[List[dict], InferenceStats]:
