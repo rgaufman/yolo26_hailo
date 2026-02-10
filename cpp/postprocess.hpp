@@ -7,12 +7,13 @@
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
+#include <map>
 
 struct Detection {
-    float x, y, w, h;
+    float x1, y1, x2, y2;
     float conf;
     int cls_id;
-    std::string cls_name;
+    const char* cls_name;
 };
 
 // COCO Classes
@@ -32,15 +33,39 @@ static inline float sigmoid(float x) {
     return 1.0f / (1.0f + std::exp(-x));
 }
 
-// Template Helper to carry compile-time integer lists
+// Identify output tensors by size
+// Returns true on success, false on failure (missing tensors)
+// We need to identify cls_80, cls_40, cls_20, reg_80, reg_40, reg_20
+inline bool map_output_tensors(
+    const std::map<std::string, std::vector<float>>& output_buffers,
+    std::vector<const float*>& cls_ptrs,
+    std::vector<const float*>& reg_ptrs) 
+{
+    cls_ptrs.resize(3, nullptr);
+    reg_ptrs.resize(3, nullptr);
+
+    for (const auto& pair : output_buffers) {
+        size_t count = pair.second.size();
+        
+        if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8 cls
+        else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16 cls
+        else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32 cls
+        else if (count == 25600) reg_ptrs[0] = pair.second.data();  // Stride 8 reg
+        else if (count == 6400) reg_ptrs[1] = pair.second.data();   // Stride 16 reg
+        else if (count == 1600) reg_ptrs[2] = pair.second.data();   // Stride 32 reg
+    }
+    
+    // Verify all pointers found
+    if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || 
+        !reg_ptrs[0] || !reg_ptrs[1] || !reg_ptrs[2]) {
+        return false;
+    }
+    return true;
+}
+
 template <int... Is>
 struct IntList {};
 
-// Templated run_postprocess
-// Strides: e.g. 8, 16, 32
-// Grids: e.g. 80, 40, 20
-// cls_tensors: Vector of pointers to class data for each scale. Order must match Strides/Grids.
-// reg_tensor: Pointer to regression data (all scales concatenated)
 template <int... Strides, int... Grids>
 std::vector<Detection> run_postprocess(
     IntList<Strides...>,
@@ -50,7 +75,6 @@ std::vector<Detection> run_postprocess(
     float conf_threshold
 ) {
     const int strides[] = {Strides...};
-    (void)strides; // Suppress unused warning
     constexpr int grids[] = {Grids...};
     constexpr size_t NUM_SCALES = sizeof...(Strides);
     
@@ -63,9 +87,11 @@ std::vector<Detection> run_postprocess(
     }
 
     std::vector<Detection> results;
-    // Calculate logit threshold once
+    
+    // Clamp threshold
     if (conf_threshold <= 0.0f) conf_threshold = 0.001f;
     if (conf_threshold >= 1.0f) conf_threshold = 0.999f;
+    
     float logit_threshold = -std::log(1.0f / conf_threshold - 1.0f);
 
     for (size_t s = 0; s < NUM_SCALES; ++s) {
@@ -73,10 +99,9 @@ std::vector<Detection> run_postprocess(
         int grid_dim = grids[s];
         int num_anchors = grid_dim * grid_dim;
         const float* cls_data = cls_tensors[s];
+        const float* reg_data = reg_tensors[s];
 
         for (int i = 0; i < num_anchors; ++i) {
-            
-
             float max_logit = -1000.0f; 
             int class_id = -1;
             int anchor_offset = i * 80;
@@ -92,15 +117,11 @@ std::vector<Detection> run_postprocess(
             if (max_logit > logit_threshold) {
                 float score = sigmoid(max_logit);
                 
-
-                const float* reg_data = reg_tensors[s];
                 int reg_offset = i * 4;
-                
                 float l = reg_data[reg_offset + 0];
                 float t = reg_data[reg_offset + 1];
                 float r = reg_data[reg_offset + 2];
                 float b = reg_data[reg_offset + 3];
-
                 
                 int row = i / grid_dim;
                 int col = i % grid_dim;
@@ -113,15 +134,15 @@ std::vector<Detection> run_postprocess(
                 float y2 = (row + 0.5f + b) * stride;
                 
                 Detection det;
-                det.x = x1;
-                det.y = y1;
-                det.w = x2;
-                det.h = y2;
+                det.x1 = x1;
+                det.y1 = y1;
+                det.x2 = x2; 
+                det.y2 = y2; 
                 det.conf = score;
                 det.cls_id = class_id;
                 
                 if (class_id >= 0 && (size_t)class_id < COCO_CLASSES.size()) {
-                    det.cls_name = COCO_CLASSES[class_id];
+                    det.cls_name = COCO_CLASSES[class_id].c_str();
                 } else {
                     det.cls_name = "unknown";
                 }

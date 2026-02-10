@@ -20,7 +20,7 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
-#include <fstream>
+
 
 #include "postprocess.hpp"
 
@@ -176,17 +176,7 @@ int main(int argc, char** argv) {
         std::vector<const float*> cls_ptrs(3);
         std::vector<const float*> reg_ptrs(3);
         
-        for (auto& pair : output_buffers) {
-            size_t count = pair.second.size();
-            if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8 cls
-            else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16 cls
-            else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32 cls
-            else if (count == 25600) reg_ptrs[0] = pair.second.data();  // Stride 8 reg
-            else if (count == 6400) reg_ptrs[1] = pair.second.data();   // Stride 16 reg
-            else if (count == 1600) reg_ptrs[2] = pair.second.data();   // Stride 32 reg
-        }
-        
-        if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptrs[0] || !reg_ptrs[1] || !reg_ptrs[2]) {
+        if (!map_output_tensors(output_buffers, cls_ptrs, reg_ptrs)) {
              std::cerr << "Error: Invalid output buffer sizes." << std::endl;
              std::cerr << "Sizes found:" << std::endl;
              for (auto& pair : output_buffers) std::cout << pair.first << ": " << pair.second.size() << std::endl;
@@ -209,24 +199,10 @@ int main(int argc, char** argv) {
 
         for (const auto& det : detections) {
             // Scale
-            float x = det.x * scale_x;
-            float y = det.y * scale_y;
-            float w = det.w * scale_x;
-            float h = det.h * scale_y;
-            
-            // COCO format: [x_min, y_min, width, height]
-            // det.x, det.y are top-left?
-            // postprocess.hpp:
-            // "box[0] = cx - w/2; box[1] = cy - h/2; box[2] = cx + w/2; box[3] = cy + h/2;"
-            // wait, run_postprocess returns x,y,w,h in what format?
-            // "det.x = x1; det.y = y1; det.w = x2; det.h = y2;" based on:
-            // "detections.push_back({x1, y1, x2, y2, score, class_id, COCO_CLASSES[class_id]});"
-            // So detection struct x,y,w,h are actually x1, y1, x2, y2.
-            // Wait, looking at struct: "float x, y, w, h;"
-            // Postprocess implementation details:
-            // "float x1 = (cx - w_box / 2.0f) * stride;"
-            // "results.push_back({x1, y1, x2, y2, score, class_id, ...})"
-            // So YES: x=x1, y=y1, w=x2, h=y2.
+            float x = det.x1 * scale_x;
+            float y = det.y1 * scale_y;
+            float w = det.x2 * scale_x;
+            float h = det.y2 * scale_y;
             
             // COCO expects [x, y, width, height].
             // So: x_coco = x1, y_coco = y1, w_coco = x2 - x1, h_coco = y2 - y1.

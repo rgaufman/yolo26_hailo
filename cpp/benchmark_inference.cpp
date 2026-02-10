@@ -21,6 +21,7 @@
 #include <cmath>
 #include <algorithm>
 #include <random>
+#include <map>
 
 #include "postprocess.hpp"
 
@@ -131,6 +132,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Pre-calculate pointers for post-processing to avoid overhead in loop
+    std::vector<const float*> cls_ptrs(3);
+    std::vector<const float*> reg_ptrs(3);
+    
+    // We Map once. Note: The data in the buffers changes, but the pointers to the vectors' data stay valid 
+    // as long as vectors are not resized. They are fixed size here.
+    if (!map_output_tensors(output_buffers, cls_ptrs, reg_ptrs)) {
+         std::cerr << "Warning: Could not map output tensors correctly. benchmark might crash or fail." << std::endl;
+    }
+
     // 4. Benchmark Loop
     std::cout << "[Running Benchmark (" << iterations << " iterations)...]" << std::endl;
     std::vector<double> inf_timings;
@@ -156,26 +167,6 @@ int main(int argc, char** argv) {
         auto end_inf = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> duration_inf = end_inf - start_inf;
         inf_timings.push_back(duration_inf.count());
-
-        // --- Post-process Preparation ---
-        std::vector<const float*> cls_ptrs(3);
-        std::vector<const float*> reg_ptrs(3);
-        
-        for (auto& pair : output_buffers) {
-            size_t count = pair.second.size();
-            if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8 cls
-            else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16 cls
-            else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32 cls
-            else if (count == 25600) reg_ptrs[0] = pair.second.data();  // Stride 8 reg
-            else if (count == 6400) reg_ptrs[1] = pair.second.data();   // Stride 16 reg
-            else if (count == 1600) reg_ptrs[2] = pair.second.data();   // Stride 32 reg
-        }
-        
-        if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptrs[0] || !reg_ptrs[1] || !reg_ptrs[2]) {
-             // In benchmark, maybe we should warn but continue? 
-             // If pointers are wrong, we might crash.
-             // But size check should be consistent.
-        }
 
         // --- Post-process ---
         auto start_post = std::chrono::high_resolution_clock::now();

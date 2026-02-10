@@ -157,35 +157,10 @@ int main(int argc, char** argv) {
     std::cout << "✓ Inference completed in " << duration.count() << "ms" << std::endl;
 
     // 4. Map outputs to expected structure for post-processing
-    // We need to identify which is which.
-    // Based on shapes (deduced from size):
-    // cls_80: 80*80*80 = 512000 floats
-    // cls_40: 40*40*80 = 128000 floats
-    // cls_20: 20*20*80 = 32000 floats
-    // reg_80: 80*80*4  = 25600 floats
-    // reg_40: 40*40*4  = 6400 floats
-    // reg_20: 20*20*4  = 1600 floats
+    std::vector<const float*> cls_ptrs;
+    std::vector<const float*> reg_ptrs;
     
-    std::vector<const float*> cls_ptrs(3);
-    std::vector<const float*> reg_ptrs(3);
-    for (auto& pair : output_data) {
-            size_t count = pair.second.size();
-            std::cout << "Output " << pair.first << " has " << count << " elements\n";
-        }
-    for (auto& pair : output_data) {
-        size_t count = pair.second.size();
-        if (count == 512000) cls_ptrs[0] = pair.second.data();      // Stride 8 cls
-        else if (count == 128000) cls_ptrs[1] = pair.second.data(); // Stride 16 cls
-        else if (count == 32000) cls_ptrs[2] = pair.second.data();  // Stride 32 cls
-        else if (count == 25600) reg_ptrs[0] = pair.second.data();  // Stride 8 reg
-        else if (count == 6400) reg_ptrs[1] = pair.second.data();   // Stride 16 reg
-        else if (count == 1600) reg_ptrs[2] = pair.second.data();   // Stride 32 reg
-        else {
-            std::cout << "Warning: Unknown output tensor size: " << count << " (" << pair.first << ")" << std::endl;
-        }
-    }
-    
-    if (!cls_ptrs[0] || !cls_ptrs[1] || !cls_ptrs[2] || !reg_ptrs[0] || !reg_ptrs[1] || !reg_ptrs[2]) {
+    if (!map_output_tensors(output_data, cls_ptrs, reg_ptrs)) {
         std::cerr << "Error: Could not identify all required output tensors by size." << std::endl;
         std::cerr << "Sizes found:" << std::endl;
         for (auto& pair : output_data) std::cout << pair.first << ": " << pair.second.size() << std::endl;
@@ -206,19 +181,17 @@ int main(int argc, char** argv) {
     // 6. Visualize
     // Scale detections
     float scale_y = (float)orig_image.rows / TARGET_HEIGHT;
-    float scale_x = (float)orig_image.cols / TARGET_WIDTH; // Actually we resized ignoring aspect ratio in step 1?
-    // "cv::resize(orig_image, resized_image, cv::Size(TARGET_WIDTH, TARGET_HEIGHT));" -> Yes, stretched.
-    // So separate scales are correct.
+    float scale_x = (float)orig_image.cols / TARGET_WIDTH;
     
     for (const auto& det : detections) {
-        int x1 = (int)(det.x * scale_x);
-        int y1 = (int)(det.y * scale_y);
-        int x2 = (int)(det.w * scale_x); // det.w is actually x2 (right)
-        int y2 = (int)(det.h * scale_y); // det.h is actually y2 (bottom)
+        int x1 = (int)(det.x1 * scale_x);
+        int y1 = (int)(det.y1 * scale_y);
+        int x2 = (int)(det.x2 * scale_x);
+        int y2 = (int)(det.y2 * scale_y);
         
         cv::rectangle(orig_image, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 0), 2);
         
-        std::string label = det.cls_name + " " + std::to_string(det.conf).substr(0, 4);
+        std::string label = std::string(det.cls_name) + " " + std::to_string(det.conf).substr(0, 4);
         int baseline = 0;
         cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
         cv::rectangle(orig_image, cv::Point(x1, y1 - textSize.height - 5), cv::Point(x1 + textSize.width, y1), cv::Scalar(0, 255, 0), -1);
