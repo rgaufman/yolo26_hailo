@@ -23,6 +23,7 @@
 
 
 #include "postprocess.hpp"
+#include "preprocess.hpp"
 
 using namespace hailort;
 
@@ -152,15 +153,15 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // Load & Preprocess
+        // Preprocess
         cv::Mat orig_image = cv::imread(img_path);
         if (orig_image.empty()) {
             std::cerr << "Error: Could not read image: " << img_path << std::endl;
             continue;
         }
 
-        cv::Mat resized_image;
-        cv::resize(orig_image, resized_image, cv::Size(TARGET_WIDTH, TARGET_HEIGHT));
+        LetterboxInfo lb_info = letterbox_image(orig_image, TARGET_WIDTH, TARGET_HEIGHT);
+        cv::Mat resized_image = lb_info.image;
         cv::cvtColor(resized_image, resized_image, cv::COLOR_BGR2RGB);
 
         // Inference
@@ -194,19 +195,23 @@ int main(int argc, char** argv) {
         );
 
         // Scale and Save
-        float scale_x = (float)orig_image.cols / TARGET_WIDTH;
-        float scale_y = (float)orig_image.rows / TARGET_HEIGHT;
+        // float scale_x = (float)orig_image.cols / TARGET_WIDTH; // OLD SIMPLE RESIZE
+        // float scale_y = (float)orig_image.rows / TARGET_HEIGHT; // OLD SIMPLE RESIZE
 
         for (const auto& det : detections) {
-            // Scale
-            float x = det.x1 * scale_x;
-            float y = det.y1 * scale_y;
-            float w = det.x2 * scale_x;
-            float h = det.y2 * scale_y;
+            // Reverse Letterbox: (x - pad) / scale
+            float x = (det.x1 - lb_info.pad_w) / lb_info.scale;
+            float y = (det.y1 - lb_info.pad_h) / lb_info.scale;
+            float w = (det.x2 - lb_info.pad_w) / lb_info.scale;
+            float h = (det.y2 - lb_info.pad_h) / lb_info.scale;
             
-            // COCO expects [x, y, width, height].
-            // So: x_coco = x1, y_coco = y1, w_coco = x2 - x1, h_coco = y2 - y1.
+            // Clip to image bounds
+            x = std::max(0.0f, std::min(x, (float)orig_image.cols));
+            y = std::max(0.0f, std::min(y, (float)orig_image.rows));
+            w = std::max(0.0f, std::min(w, (float)orig_image.cols));
+            h = std::max(0.0f, std::min(h, (float)orig_image.rows));
             
+            // COCO expects [x_min, y_min, width, height]
             float coco_x = x;
             float coco_y = y;
             float coco_w = w - x;

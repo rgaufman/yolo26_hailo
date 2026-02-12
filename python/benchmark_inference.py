@@ -18,7 +18,7 @@ def run_inference(args):
         # Preprocess
         t_pre = time.perf_counter()
         if args.image:
-            input_data, _ = HailoPythonInferenceEngine.preprocess(args.image, normalize=args.normalize)
+            input_data, _, _, _, _ = HailoPythonInferenceEngine.preprocess(args.image, normalize=args.normalize)
         else:
             # Generate random data: normalized float32 [0,1] or uint8 [0,255]
             if args.normalize:

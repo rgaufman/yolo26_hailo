@@ -19,7 +19,24 @@ def sigmoid(x):
 # Common Image Operations
 # ============================================================================
 
-def load_and_preprocess_image(img_path: str, target_size: int = 640, normalize: bool = False) -> Tuple[np.ndarray, Tuple[int, int]]:
+def letterbox_image(img, target_size=640, color=(114, 114, 114)):
+    """Resize image with aspect ratio preservation (letterbox)"""
+    h, w = img.shape[:2]
+    scale = min(target_size / h, target_size / w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    
+    resized = cv2.resize(img, (new_w, new_h))
+    
+    pad_w = (target_size - new_w) // 2
+    pad_h = (target_size - new_h) // 2
+    
+    padded = np.full((target_size, target_size, 3), color, dtype=np.uint8)
+    padded[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized
+    
+    return padded, scale, pad_w, pad_h
+
+def load_and_preprocess_image(img_path: str, target_size: int = 640, normalize: bool = False) -> Tuple[np.ndarray, Tuple[int, int], float, int, int]:
     """Load and preprocess image for inference
     
     Args:
@@ -28,7 +45,7 @@ def load_and_preprocess_image(img_path: str, target_size: int = 640, normalize: 
         normalize: If True, normalize to [0,1]; if False, keep as uint8 [0,255]
     
     Returns:
-        (input_tensor, original_size) where original_size is (H, W)
+        (input_tensor, original_size, scale, pad_w, pad_h)
     """
     img = cv2.imread(img_path)
     if img is None:
@@ -38,15 +55,16 @@ def load_and_preprocess_image(img_path: str, target_size: int = 640, normalize: 
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     
     orig_h, orig_w = img.shape[:2]
-    img = cv2.resize(img, (target_size, target_size))
+    
+    padded, scale, pad_w, pad_h = letterbox_image(img, target_size)
     
     if normalize:
-        img = img.astype(np.float32) / 255.0
-        input_tensor = np.expand_dims(img, axis=0)
+        padded = padded.astype(np.float32) / 255.0
+        input_tensor = np.expand_dims(padded, axis=0)
     else:
-        input_tensor = np.expand_dims(img, axis=0).astype(np.uint8)
+        input_tensor = np.expand_dims(padded, axis=0).astype(np.uint8)
     
-    return input_tensor, (orig_h, orig_w)
+    return input_tensor, (orig_h, orig_w), scale, pad_w, pad_h
 
 
 
@@ -54,20 +72,34 @@ def load_and_preprocess_image(img_path: str, target_size: int = 640, normalize: 
 
 
 
-def scale_detections_to_original(detections: List[dict], orig_h: int) -> List[dict]:
+def scale_detections_to_original(detections: List[dict], orig_h: int, orig_w: int, scale: float, pad_w: int, pad_h: int) -> List[dict]:
     """Scale detection coordinates from inference space (640x640) to original image space
     
     Args:
-        detections: List of detection dicts with x, y, w, h coordinates
-        orig_h: Original image height (width assumed 640)
-    
-    Returns:
-        List of detections with scaled coordinates
+        detections: List of detection dicts with x, y, w, h coordinates (acting as x1, y1, x2, y2)
+        orig_h, orig_w: Original image dimensions
+        scale: Scale factor used in preprocessing
+        pad_w, pad_h: Padding used in preprocessing
     """
-    scale_y = orig_h / 640.0
     for det in detections:
-        det['y'] = det['y'] * scale_y
-        det['h'] = det['h'] * scale_y
+        # 1. Reverse padding
+        x_unpad = det['x'] - pad_w
+        y_unpad = det['y'] - pad_h
+        w_unpad = det['w'] - pad_w
+        h_unpad = det['h'] - pad_h
+        
+        # 2. Reverse scaling
+        x = x_unpad / scale
+        y = y_unpad / scale
+        w = w_unpad / scale
+        h = h_unpad / scale
+        
+        # 3. Clip to original dimensions
+        det['x'] = max(0, min(x, orig_w))
+        det['y'] = max(0, min(y, orig_h))
+        det['w'] = max(0, min(w, orig_w))
+        det['h'] = max(0, min(h, orig_h))
+        
     return detections
 
 
@@ -158,40 +190,9 @@ class HailoPythonInferenceEngine:
         print(f"✓ Using Python head for post-processing.")
     
     @staticmethod
-    def preprocess(img_path: str, width: int = 640, height: int = 640, normalize: bool = False) -> Tuple[np.ndarray, Tuple[int, int]]:
-        """Preprocess image to tensor and return original dimensions
-        
-        Args:
-            img_path: Path to input image
-            width: Target width (default 640)
-            height: Target height (default 640)
-            normalize: If True, normalize to [0,1] by dividing by 255 (for ONNX-only inference).
-                      If False (default), keep as uint8 [0,255] to match HEF quantization.
-                      The HEF model expects uint8 and has quantization parameters that handle normalization.
-        
-        Returns:
-            (input_tensor, original_size) where input_tensor is (1, 640, 640, 3) and original_size is (H, W)
-        """
-        img = cv2.imread(img_path)
-        if img is None:
-            raise FileNotFoundError(f"Image not found: {img_path}")
-        
-        # YOLO models expect RGB, but cv2.imread loads as BGR, so convert
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        orig_h, orig_w = img.shape[:2]
-        img = cv2.resize(img, (width, height))
-        
-        if normalize:
-            # For ONNX-only: normalize to [0, 1] by (x - 0) / 255 = x / 255
-            img = img.astype(np.float32) / 255.0
-            input_tensor = np.expand_dims(img, axis=0)
-        else:
-            # Default for hybrid inference: keep as uint8 [0, 255]
-            # HEF quantization parameters handle the normalization
-            input_tensor = np.expand_dims(img, axis=0).astype(np.uint8)
-        
-        return input_tensor, (orig_h, orig_w)
+    def preprocess(img_path: str, width: int = 640, height: int = 640, normalize: bool = False) -> Tuple[np.ndarray, Tuple[int, int], float, int, int]:
+        """Preprocess image to tensor and return original dimensions + stats"""
+        return load_and_preprocess_image(img_path, width, normalize)
     
     @staticmethod
     def load_image(img_path: str) -> np.ndarray:

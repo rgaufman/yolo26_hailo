@@ -22,7 +22,7 @@ def detect_and_visualize(args):
     
     # Preprocess for inference
     print("[Preprocessing...]")
-    input_data, orig_size = HailoPythonInferenceEngine.preprocess(args.image, normalize=args.normalize)
+    input_data, orig_size, scale, pad_w, pad_h = HailoPythonInferenceEngine.preprocess(args.image, normalize=args.normalize)
     print(f"✓ Preprocessed to: {input_data.shape}, dtype={input_data.dtype}")
     
     # Run inference
@@ -38,7 +38,7 @@ def detect_and_visualize(args):
     print(format_detection_results(results))
     
     # Scale detections to original image space
-    results = scale_detections_to_original(results, orig_h)
+    results = scale_detections_to_original(results, orig_h, orig_w, scale, pad_w, pad_h)
     
     # Draw bboxes on original image
     print("[Drawing bounding boxes...]")
