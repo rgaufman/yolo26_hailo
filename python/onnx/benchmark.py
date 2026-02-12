@@ -1,4 +1,4 @@
-#!/home/rpi5/hailo-apps/venv_hailo_apps/bin/python
+#!/usr/bin/env python3
 import numpy as np
 import argparse
 import time

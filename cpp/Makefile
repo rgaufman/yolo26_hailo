@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++14 -O3 -Wall -I. $(shell pkg-config --cflags opencv4)
+CXXFLAGS = -std=c++17 -O3 -Wall -I. $(shell pkg-config --cflags opencv4)
 LDFLAGS = $(shell pkg-config --libs opencv4) -lhailort
 
 TARGETS = detect_image benchmark_inference run_coco_inference

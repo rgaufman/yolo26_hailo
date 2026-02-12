@@ -85,7 +85,7 @@ if __name__ == "__main__":
     parser.add_argument('--detections', type=str, required=True, 
                        help="Path to detections JSON file")
     parser.add_argument('--coco_ann', type=str, 
-                       default='/home/rpi5/projects/coco_data/annotations/instances_val2017.json',
+                       default='data/coco/annotations/instances_val2017.json',
                        help="Path to COCO annotations file")
     parser.add_argument('--verbose', action='store_true', help="Verbose output")
     

@@ -33,7 +33,7 @@ def detect_and_visualize(args):
     
     print(f"✓ Inference completed in {total_time*1000:.2f}ms")
     print(f"  - Hailo: {stats.hailo_inference_time*1000:.2f}ms")
-    print(f"  - Python Head: {stats.data_mapping_time*1000:.2f}ms")
+    print(f"  - Python Head: {stats.postprocess_time*1000:.2f}ms")
     print(f"✓ Found {len(results)} detections above threshold {args.conf_threshold}")
     print(format_detection_results(results))
     

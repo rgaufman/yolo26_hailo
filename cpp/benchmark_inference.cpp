@@ -3,9 +3,9 @@
  * 
  * Benchmark the Hailo-8L inference performance.
  * Measures the time taken for write + read (roundtrip) over multiple iterations.
- * Uses random input data.
+ * Supports both real images (from a directory) and random input data.
  * 
- * Usage: ./benchmark_inference [hef_path] [iterations]
+ * Usage: ./benchmark_inference [hef_path] [iterations] [--images <dir>]
  */
 
 #include "hailo/hailort.hpp"
@@ -13,6 +13,7 @@
 #include "hailo/infer_model.hpp"
 #include "hailo/vstream.hpp"
 
+#include <opencv2/opencv.hpp>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -24,6 +25,7 @@
 #include <map>
 
 #include "postprocess.hpp"
+#include "preprocess.hpp"
 
 using namespace hailort;
 
@@ -55,13 +57,34 @@ void print_stats(const std::string& name, const std::vector<double>& timings) {
 
 int main(int argc, char** argv) {
     std::string hef_path = (argc > 1) ? argv[1] : "../models/yolo26n.hef";
-    int iterations = (argc > 2) ? std::stoi(argv[2]) : 100;
+    int iterations = 100;
+    std::string images_dir = "";
+    float conf_threshold = 0.25f;
+
+    // Re-parse arguments to handle optional iterations and flags correctly
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--images" && i + 1 < argc) {
+            images_dir = argv[++i];
+        } else if (arg == "--conf" && i + 1 < argc) {
+            conf_threshold = std::stof(argv[++i]);
+        } else if (std::isdigit(arg[0])) {
+            iterations = std::stoi(arg);
+        }
+    }
+    
     
     if (iterations <= 0) iterations = 100;
 
     std::cout << "[Benchmark Configuration]" << std::endl;
     std::cout << "  HEF: " << hef_path << std::endl;
     std::cout << "  Iterations: " << iterations << std::endl;
+    std::cout << "  Conf threshold: " << conf_threshold << std::endl;
+    if (!images_dir.empty()) {
+        std::cout << "  Images dir: " << images_dir << std::endl;
+    } else {
+        std::cout << "  Input: Random data" << std::endl;
+    }
 
     // 1. Setup Hailo
     std::cout << "[Setting up Hailo Device...]" << std::endl;
@@ -105,13 +128,52 @@ int main(int argc, char** argv) {
     }
 
     // 2. Prepare Data
-    std::cout << "[Generating Random Input Data...]" << std::endl;
-    std::vector<uint8_t> input_data(INPUT_SIZE);
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, 255);
-    for (size_t i = 0; i < INPUT_SIZE; ++i) {
-        input_data[i] = static_cast<uint8_t>(dis(gen));
+    // Load real images or generate random data
+    std::vector<std::vector<uint8_t>> input_frames;
+    
+    if (!images_dir.empty()) {
+        std::cout << "[Loading images from " << images_dir << "...]" << std::endl;
+        std::vector<std::string> image_paths;
+        cv::glob(images_dir + "/*.jpg", image_paths);
+        
+        if (image_paths.empty()) {
+            std::cerr << "Error: No .jpg images found in " << images_dir << std::endl;
+            return 1;
+        }
+        
+        // Load up to 'iterations' images, cycling if needed
+        for (int i = 0; i < iterations; ++i) {
+            const std::string& path = image_paths[i % image_paths.size()];
+            cv::Mat img = cv::imread(path);
+            if (img.empty()) {
+                std::cerr << "Warning: Could not read " << path << ", skipping" << std::endl;
+                continue;
+            }
+            
+            LetterboxInfo lb = letterbox_image(img, INPUT_WIDTH, INPUT_HEIGHT);
+            cv::Mat rgb;
+            cv::cvtColor(lb.image, rgb, cv::COLOR_BGR2RGB);
+            
+            std::vector<uint8_t> frame(rgb.data, rgb.data + rgb.total() * rgb.elemSize());
+            input_frames.push_back(std::move(frame));
+        }
+        
+        std::cout << "  Loaded " << input_frames.size() << " preprocessed frames (" 
+                  << image_paths.size() << " unique images)" << std::endl;
+        iterations = (int)input_frames.size();
+    } else {
+        std::cout << "[Generating Random Input Data...]" << std::endl;
+        std::vector<uint8_t> random_data(INPUT_SIZE);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, 255);
+        for (size_t i = 0; i < INPUT_SIZE; ++i) {
+            random_data[i] = static_cast<uint8_t>(dis(gen));
+        }
+        // Use the same random frame for all iterations
+        for (int i = 0; i < iterations; ++i) {
+            input_frames.push_back(random_data);
+        }
     }
 
     // Prepare output buffers map
@@ -123,7 +185,7 @@ int main(int argc, char** argv) {
     // 3. Warmup
     std::cout << "[Warming up...]" << std::endl;
     for (int i = 0; i < 10; ++i) {
-        hailo_status status = input_vstreams[0].write(MemoryView(input_data.data(), input_data.size()));
+        hailo_status status = input_vstreams[0].write(MemoryView(input_frames[0].data(), input_frames[0].size()));
         if (status != HAILO_SUCCESS) { print_error(status, "Warmup write failed"); return 1; }
         
         for (auto& ov : output_vstreams) {
@@ -136,27 +198,38 @@ int main(int argc, char** argv) {
     std::vector<const float*> cls_ptrs(3);
     std::vector<const float*> reg_ptrs(3);
     
-    // We Map once. Note: The data in the buffers changes, but the pointers to the vectors' data stay valid 
-    // as long as vectors are not resized. They are fixed size here.
+    // Map once. The data in the buffers changes, but pointers stay valid.
     if (!map_output_tensors(output_buffers, cls_ptrs, reg_ptrs)) {
-         std::cerr << "Warning: Could not map output tensors correctly. benchmark might crash or fail." << std::endl;
+         std::cerr << "Warning: Could not map output tensors correctly. Benchmark might crash or fail." << std::endl;
     }
 
     // 4. Benchmark Loop
     std::cout << "[Running Benchmark (" << iterations << " iterations)...]" << std::endl;
+    std::vector<double> preprocess_timings;
     std::vector<double> inf_timings;
     std::vector<double> post_timings;
     std::vector<double> total_timings;
     
+    preprocess_timings.reserve(iterations);
     inf_timings.reserve(iterations);
     post_timings.reserve(iterations);
     total_timings.reserve(iterations);
 
     for (int i = 0; i < iterations; ++i) {
+        auto start_total = std::chrono::high_resolution_clock::now();
+        
+        // --- Preprocess (only if using real images; already done, just measuring access) ---
+        auto start_pre = std::chrono::high_resolution_clock::now();
+        uint8_t* frame_data = input_frames[i].data();
+        size_t frame_size = input_frames[i].size();
+        auto end_pre = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> duration_pre = end_pre - start_pre;
+        preprocess_timings.push_back(duration_pre.count());
+
         // --- Inference ---
         auto start_inf = std::chrono::high_resolution_clock::now();
         
-        hailo_status status = input_vstreams[0].write(MemoryView(input_data.data(), input_data.size()));
+        hailo_status status = input_vstreams[0].write(MemoryView(frame_data, frame_size));
         if (status != HAILO_SUCCESS) { print_error(status, "Benchmark write failed"); return 1; }
         
         for (auto& ov : output_vstreams) {
@@ -171,22 +244,21 @@ int main(int argc, char** argv) {
         // --- Post-process ---
         auto start_post = std::chrono::high_resolution_clock::now();
         
-        // Run with a low threshold to ensure SOME processing happens, 
-        // though with random data it's unpredictable how many boxes pass.
-        // Let's use 0.01 threshold.
         run_postprocess(
             IntList<8, 16, 32>{},
             IntList<80, 40, 20>{},
             cls_ptrs,
             reg_ptrs,
-            0.01f 
+            conf_threshold
         );
         
         auto end_post = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> duration_post = end_post - start_post;
         post_timings.push_back(duration_post.count());
         
-        total_timings.push_back(duration_inf.count() + duration_post.count());
+        auto end_total = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> duration_total = end_total - start_total;
+        total_timings.push_back(duration_total.count());
         
         if (i % 50 == 0 && i > 0) std::cout << "." << std::flush;
     }
@@ -195,6 +267,12 @@ int main(int argc, char** argv) {
     // 5. Statistics
     std::cout << "\n[Results]" << std::endl;
     std::cout << "  Iterations: " << iterations << std::endl;
+    std::cout << "  Conf threshold: " << conf_threshold << std::endl;
+    if (!images_dir.empty()) {
+        std::cout << "  Input: Real images from " << images_dir << std::endl;
+    } else {
+        std::cout << "  Input: Random data" << std::endl;
+    }
     
     print_stats("Hailo Inference (Write+Read)", inf_timings);
     print_stats("CPU Post-processing", post_timings);

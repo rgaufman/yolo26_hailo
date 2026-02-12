@@ -1,4 +1,4 @@
-"""Common utilities for Hailo-8L + ONNX hybrid inference"""
+"""Common utilities for Hailo-8L inference on YOLO26 (NMS-free dual-head model)"""
 
 import numpy as np
 import cv2
@@ -6,13 +6,11 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Tuple, List
 from hailo_platform import VDevice, HEF, ConfigureParams, InputVStreamParams, OutputVStreamParams, InferVStreams, HailoStreamInterface, FormatType
-import math
-
-# ultralytics removed
 
 
-def sigmoid(x):
-    return 1 / (1 + math.exp(-x))
+def sigmoid(x: np.ndarray) -> np.ndarray:
+    """Vectorized sigmoid"""
+    return 1.0 / (1.0 + np.exp(-x))
 
 
 # ============================================================================
@@ -76,29 +74,17 @@ def scale_detections_to_original(detections: List[dict], orig_h: int, orig_w: in
     """Scale detection coordinates from inference space (640x640) to original image space
     
     Args:
-        detections: List of detection dicts with x, y, w, h coordinates (acting as x1, y1, x2, y2)
+        detections: List of detection dicts with x1, y1, x2, y2 coordinates
         orig_h, orig_w: Original image dimensions
         scale: Scale factor used in preprocessing
         pad_w, pad_h: Padding used in preprocessing
     """
     for det in detections:
-        # 1. Reverse padding
-        x_unpad = det['x'] - pad_w
-        y_unpad = det['y'] - pad_h
-        w_unpad = det['w'] - pad_w
-        h_unpad = det['h'] - pad_h
-        
-        # 2. Reverse scaling
-        x = x_unpad / scale
-        y = y_unpad / scale
-        w = w_unpad / scale
-        h = h_unpad / scale
-        
-        # 3. Clip to original dimensions
-        det['x'] = max(0, min(x, orig_w))
-        det['y'] = max(0, min(y, orig_h))
-        det['w'] = max(0, min(w, orig_w))
-        det['h'] = max(0, min(h, orig_h))
+        # 1. Reverse padding, 2. Reverse scaling
+        det['x1'] = max(0, min((det['x1'] - pad_w) / scale, orig_w))
+        det['y1'] = max(0, min((det['y1'] - pad_h) / scale, orig_h))
+        det['x2'] = max(0, min((det['x2'] - pad_w) / scale, orig_w))
+        det['y2'] = max(0, min((det['y2'] - pad_h) / scale, orig_h))
         
     return detections
 
@@ -115,7 +101,7 @@ def format_detection_results(detections: List[dict], show_count: int = 10) -> st
     """
     lines = []
     for i, det in enumerate(detections[:show_count] if show_count else detections):
-        lines.append(f"  [{i+1}] {det['cls_name']} - conf={det['conf']:.2f}, x={det['x']:.0f}, y={det['y']:.0f}, w={det['w']:.0f}, h={det['h']:.0f}")
+        lines.append(f"  [{i+1}] {det['cls_name']} - conf={det['conf']:.2f}, bbox=[{det['x1']:.0f}, {det['y1']:.0f}, {det['x2']:.0f}, {det['y2']:.0f}]")
     return '\n'.join(lines)
 
 
@@ -149,8 +135,7 @@ class InferenceStats:
     """Runtime statistics for inference"""
     preprocess_time: float
     hailo_inference_time: float
-    data_mapping_time: float
-    onnx_inference_time: float
+    postprocess_time: float
     total_time: float
     hailo_output_shape: str
     final_output_shape: str
@@ -204,7 +189,7 @@ class HailoPythonInferenceEngine:
 
     
     def _run_python_head(self, dequantized_results: Dict, conf_threshold: float) -> List[dict]:
-        """Run python head logic on dequantized Hailo outputs."""
+        """Run python head logic on dequantized Hailo outputs (vectorized)."""
         
         # 1. Map dequantized results to named tensors
         tensors = {}
@@ -220,31 +205,13 @@ class HailoPythonInferenceEngine:
         required_tensors = ['cls_80', 'cls_40', 'cls_20', 'reg_80', 'reg_40', 'reg_20']
         missing = [t for t in required_tensors if t not in tensors]
         if missing:
-            # Fallback for old model or error
-            if 'reg' in self.shape_to_name and (1, 1, 8400, 4) in [s for s in found_shapes]:
-                 print("Warning: Detected old model output structure. Please update HEF.")
-            # Verify we have at least what we need
-            if len(missing) > 0:
-                 print(f"Error: Missing tensors from HEF: {missing}")
-                 print(f"Found shapes: {found_shapes}")
-                 return []
+            print(f"Error: Missing tensors from HEF: {missing}")
+            print(f"Found shapes: {found_shapes}")
+            return []
 
-        # Prepare tensors list
-        # We need pairs of (cls, reg) for each scale
-        # Scales: 80x80 (stride 8), 40x40 (stride 16), 20x20 (stride 32)
-        
-        # Transpose to (channels, H, W) or flattened? 
-        # The loops below expect specific formats.
-        
-        # Original code expected: 
-        # cls: (80, 6400) -> (classes, anchors)
-        # reg: (4, 8400) -> (coords, all_anchors) (concatenated)
-        
-        # Let's adapt to processing per scale
-        
         STRIDES = [8, 16, 32]
         GRID_SIZES = [80, 40, 20]
-        LOGIT_THRESHOLD = -math.log(1.0 / conf_threshold - 1.0)
+        logit_threshold = -np.log(1.0 / conf_threshold - 1.0)
         
         results = []
         coco_classes = DetectionPostProcessor._load_coco_classes()
@@ -253,62 +220,51 @@ class HailoPythonInferenceEngine:
             stride = STRIDES[scale_idx]
             grid_dim = GRID_SIZES[scale_idx]
             
-            suffix = f"_{grid_dim}"
-            cls_key = f"cls{suffix}"
-            reg_key = f"reg{suffix}"
-            
-            cls_data = tensors[cls_key][0] # (H, W, 80)
-            reg_data = tensors[reg_key][0] # (H, W, 4)
+            cls_data = tensors[f'cls_{grid_dim}'][0]  # (H, W, 80)
+            reg_data = tensors[f'reg_{grid_dim}'][0]  # (H, W, 4)
             
             # Reshape to (H*W, C)
             cls_flat = cls_data.reshape(-1, 80)
             reg_flat = reg_data.reshape(-1, 4)
             
-            num_anchors = cls_flat.shape[0]
+            # Vectorized: find max logit and class per anchor
+            max_logits = cls_flat.max(axis=1)       # (H*W,)
+            class_ids = cls_flat.argmax(axis=1)      # (H*W,)
             
-            for i in range(num_anchors):
-
-                # Find max class score
-                max_logit = -100.0
-                class_id = -1
-                
-
-                # Simple loop optimization
-                row_logits = cls_flat[i]
-                
-
-                for c in range(80):
-                    logit = row_logits[c]
-                    if logit > max_logit:
-                        max_logit = logit
-                        class_id = c
-                
-                if max_logit > LOGIT_THRESHOLD:
-                    score = sigmoid(max_logit)
-                    
-
-                    row = i // grid_dim
-                    col = i % grid_dim
-                    
-                    l = reg_flat[i, 0]
-                    t = reg_flat[i, 1]
-                    r = reg_flat[i, 2]
-                    b = reg_flat[i, 3]
-                    
-                    x1 = (col + 0.5 - l) * stride
-                    y1 = (row + 0.5 - t) * stride
-                    x2 = (col + 0.5 + r) * stride
-                    y2 = (row + 0.5 + b) * stride
-                    
-                    results.append({
-                        'x': round(x1, 2),
-                        'y': round(y1, 2),
-                        'w': round(x2, 2),
-                        'h': round(y2, 2),
-                        'conf': round(score, 4),
-                        'cls_id': class_id,
-                        'cls_name': coco_classes.get(class_id, 'N/A')
-                    })
+            # Filter by logit threshold
+            mask = max_logits > logit_threshold
+            if not mask.any():
+                continue
+            
+            indices = np.where(mask)[0]
+            scores = sigmoid(max_logits[indices])
+            cls = class_ids[indices]
+            
+            # Grid coordinates
+            rows = indices // grid_dim
+            cols = indices % grid_dim
+            
+            # Decode boxes
+            l = reg_flat[indices, 0]
+            t = reg_flat[indices, 1]
+            r = reg_flat[indices, 2]
+            b = reg_flat[indices, 3]
+            
+            x1 = (cols + 0.5 - l) * stride
+            y1 = (rows + 0.5 - t) * stride
+            x2 = (cols + 0.5 + r) * stride
+            y2 = (rows + 0.5 + b) * stride
+            
+            for j in range(len(indices)):
+                results.append({
+                    'x1': round(float(x1[j]), 2),
+                    'y1': round(float(y1[j]), 2),
+                    'x2': round(float(x2[j]), 2),
+                    'y2': round(float(y2[j]), 2),
+                    'conf': round(float(scores[j]), 4),
+                    'cls_id': int(cls[j]),
+                    'cls_name': coco_classes.get(int(cls[j]), 'N/A')
+                })
         
         return results
     
@@ -316,7 +272,7 @@ class HailoPythonInferenceEngine:
         """Run hybrid inference pipeline with Python head"""
         stats = InferenceStats(
             preprocess_time=0, hailo_inference_time=0, 
-            data_mapping_time=0, onnx_inference_time=0, total_time=0,
+            postprocess_time=0, total_time=0,
             hailo_output_shape="", final_output_shape=""
         )
         
@@ -341,16 +297,16 @@ class HailoPythonInferenceEngine:
                 t_post = time.perf_counter()
                 
                 detections = self._run_python_head(hailo_results, conf_threshold)
-                stats.data_mapping_time = time.perf_counter() - t_post
+                stats.postprocess_time = time.perf_counter() - t_post
                 stats.final_output_shape = f"{len(detections)} detections"
-                if verbose: print(f"  ✓ Python head: {stats.data_mapping_time*1000:.2f}ms")
+                if verbose: print(f"  ✓ Python head: {stats.postprocess_time*1000:.2f}ms")
 
         stats.total_time = time.perf_counter() - t_start
         
         if verbose:
             print(f"[SUMMARY] Pipeline timing:")
             print(f"  Hailo:   {stats.hailo_inference_time*1000:7.2f}ms")
-            print(f"  PyHead:  {stats.data_mapping_time*1000:7.2f}ms")
+            print(f"  PyHead:  {stats.postprocess_time*1000:7.2f}ms")
             print(f"  Total:   {stats.total_time*1000:7.2f}ms")
         
         return detections, stats
@@ -392,11 +348,11 @@ class DetectionPostProcessor:
         """Parse detections and filter by confidence
         
         Args:
-            detections: Shape (num_detections, 6) - [x, y, w, h, conf, cls]
+            detections: Shape (num_detections, 6) - [x1, y1, x2, y2, conf, cls]
             conf_threshold: Confidence threshold
             
         Returns:
-            List of dicts with keys: [x, y, w, h, conf, cls_id, cls_name]
+            List of dicts with keys: [x1, y1, x2, y2, conf, cls_id, cls_name]
         """
         classes = DetectionPostProcessor._load_coco_classes()
         results = []
@@ -405,13 +361,12 @@ class DetectionPostProcessor:
             conf = det[4]
             if conf >= conf_threshold:
                 cls_id = int(det[5])
-                # Handle both dict (YOLO) and list formats
                 cls_name = classes.get(cls_id) if isinstance(classes, dict) else classes[cls_id]
                 results.append({
-                    'x': float(det[0]),
-                    'y': float(det[1]),
-                    'w': float(det[2]),
-                    'h': float(det[3]),
+                    'x1': float(det[0]),
+                    'y1': float(det[1]),
+                    'x2': float(det[2]),
+                    'y2': float(det[3]),
                     'conf': float(conf),
                     'cls_id': cls_id,
                     'cls_name': cls_name
@@ -427,10 +382,10 @@ class DetectionPostProcessor:
         colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
         
         for i, det in enumerate(detections):
-            x1 = int(max(0, det['x']))
-            y1 = int(max(0, det['y']))
-            x2 = int(min(w, det['w']))
-            y2 = int(min(h, det['h']))
+            x1 = int(max(0, det['x1']))
+            y1 = int(max(0, det['y1']))
+            x2 = int(min(w, det['x2']))
+            y2 = int(min(h, det['y2']))
             
             color = colors[i % len(colors)]
             cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)

@@ -40,7 +40,7 @@ def run_inference(args):
     
     total_times = np.array([s.total_time for s in stats_list])
     hailo_times = np.array([s.hailo_inference_time for s in stats_list])
-    python_head_times = np.array([s.data_mapping_time for s in stats_list])
+    python_head_times = np.array([s.postprocess_time for s in stats_list])
 
     avg_total = total_times.mean()
     std_total = total_times.std()

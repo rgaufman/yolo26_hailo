@@ -218,9 +218,24 @@ cd ..
 
 ### Run Benchmark
 
+The C++ benchmark supports both random data and real images, with configurable confidence thresholds:
+
 ```bash
-./cpp/benchmark_inference models/yolo26n.hef 1000
+# Random data (fast, minimal postprocessing)
+./cpp/benchmark_inference models/yolo26n.hef 200
+
+# Real images from COCO validation set
+./cpp/benchmark_inference models/yolo26n.hef 300 --images data/coco/val2017
+
+# Custom confidence threshold
+./cpp/benchmark_inference models/yolo26n.hef 100 --conf 0.5
 ```
+
+Arguments:
+- `[hef_path]`: Path to HEF file (default: `../models/yolo26n.hef`)
+- `[iterations]`: Number of iterations to run (default: 100)
+- `--images <dir>`: Use real images from directory instead of random data
+- `--conf <threshold>`: Confidence threshold for postprocessing (default: 0.25)
 
 ### Run Detection on Image
 
