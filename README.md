@@ -83,7 +83,11 @@ bash scripts/download_coco.sh
 If you just want to run inference, download the pre-compiled Hailo binary from the [Releases](https://github.com/DanielDubinsky/yolo26_hailo/releases) page.
 
 ```bash
+# Download all variants
 bash scripts/download_hef.sh
+
+# Download a specific variant (e.g., yolo26n)
+bash scripts/download_hef.sh n
 ```
 
 ### Option B: Export from ONNX
