@@ -65,6 +65,16 @@ pip install fiftyone
 python scripts/download_calib.py
 ```
 
+### Preprocessing Data (Optional)
+
+If you need to preprocess a dataset (e.g. for Noise Analysis or debugging) using the exact same letterbox logic as the export process:
+
+```bash
+python scripts/preprocess_dataset.py data/calib_images data/calib_npy --size 640
+```
+
+This will convert images to RGB, resize them with aspect ratio preserved (letterbox), pad with gray (114), and save them as `.npy` files.
+
 ### COCO Validation Data (for Evaluation)
 
 Download standard COCO Val 2017 images and annotations to `data/coco`:
